@@ -133,3 +133,31 @@ func prepareLDAPTestContainer(t *testing.T) string {
 
 	return retURL
 }
+
+// TestAMountWithoutLDAPAuthenticatesByTicketAlone. A machine's name lives in the realm, which is the
+// only place a machine has a name at all; the directory answers "which groups is this PERSON in".
+// Demanding an address book entry for every host means inventing an account per machine so that a
+// lookup can succeed, and then the account — not the ticket — is the thing that must be kept in
+// step. So a mount with no config/ldap authenticates by ticket and issues a group-less token, and
+// what such a caller may do is decided by the identity attached to its principal.
+func TestAMountWithoutLDAPAuthenticatesByTicketAlone(t *testing.T) {
+	// setupTestBackend configures the keytab and nothing else: no config/ldap, which is the machine
+	// mount.
+	b, storage := setupTestBackend(t)
+
+	// The login must fail on the TICKET — there is none in this request — and not on the absence
+	// of a directory.
+	resp, err := b.HandleRequest(t.Context(), &logical.Request{
+		Operation:  logical.UpdateOperation,
+		Path:       "login",
+		Storage:    storage,
+		Data:       map[string]any{"authorization": "Negotiate not-a-real-token"},
+		Connection: &logical.Connection{RemoteAddr: "127.0.0.1"},
+	})
+	if err != nil && strings.Contains(err.Error(), "ldap backend not configured") {
+		t.Fatalf("a mount with no directory refused before looking at the ticket: %v", err)
+	}
+	if err == nil && resp != nil && resp.Auth != nil {
+		t.Fatal("a token was issued for a credential that is not one")
+	}
+}

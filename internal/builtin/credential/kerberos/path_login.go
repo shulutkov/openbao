@@ -81,16 +81,24 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 		return nil, errors.New("backend kerberos not configured")
 	}
 
+	// A mount with no LDAP configuration authenticates by TICKET ALONE, and that is a deliberate
+	// second shape rather than a half-configured first one.
+	//
+	// The directory answers "which groups is this person in", and a machine is not in it: its name
+	// lives in the realm, which is the only place a machine has a name at all. Demanding an address
+	// book entry for every host means inventing an account per machine so that a lookup can
+	// succeed, and then the account — not the ticket — becomes the thing that must be kept in step.
+	//
+	// So: configure config/ldap on the mount people use, and leave it off the mount machines use.
+	// A group-less token is the honest result there; what such a caller may do is decided by the
+	// identity attached to its principal, not by a directory that has never heard of it.
 	ldapCfg, err := b.ConfigLdap(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("unable to get ldap config: %w", err)
 	}
-	if ldapCfg == nil {
-		return nil, errors.New("ldap backend not configured")
-	}
 
 	// Check for a CIDR match.
-	if len(ldapCfg.TokenBoundCIDRs) > 0 {
+	if ldapCfg != nil && len(ldapCfg.TokenBoundCIDRs) > 0 {
 		if req.Connection == nil {
 			b.Logger().Warn("token bound CIDRs found but no connection information available for validation")
 			return nil, logical.ErrPermissionDenied
@@ -155,7 +163,7 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 		// config's realm and the Kerberos realm. In such a case, it prevents a user from
 		// passing Kerberos authentication, and then extracting group membership, and
 		// therefore policies, from a separate directory.
-		if ldapCfg.UPNDomain != "" && caller.Domain() != ldapCfg.UPNDomain {
+		if ldapCfg != nil && ldapCfg.UPNDomain != "" && caller.Domain() != ldapCfg.UPNDomain {
 			w.WriteHeader(400)
 			_, _ = fmt.Fprintf(w, "identity domain of %q doesn't match LDAP upndomain of %q", caller.Domain(), ldapCfg.UPNDomain)
 			return
@@ -194,51 +202,53 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 	// Now that they've passed the Kerb authentication, begin checking if
 	// they're a member of an LDAP group that should have additional policies
 	// attached.
-	ldapClient := ldaputil.Client{
-		Logger: b.Logger(),
-		LDAP:   ldaputil.NewLDAP(),
-	}
-
-	ldapConnection, err := ldapClient.DialLDAP(ldapCfg.ConfigEntry)
-	if err != nil {
-		return nil, fmt.Errorf("could not connect to LDAP: %w", err)
-	}
-	if ldapConnection == nil {
-		return nil, errors.New("invalid connection returned from LDAP dial")
-	}
-
-	// Clean ldap connection
-	defer ldapConnection.Close()
-
-	if len(ldapCfg.BindPassword) > 0 {
-		err = ldapConnection.Bind(ldapCfg.BindDN, ldapCfg.BindPassword)
-	} else {
-		err = ldapConnection.UnauthenticatedBind(ldapCfg.BindDN)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("LDAP bind failed: %v", err)
-	}
-
-	userBindDN, err := ldapClient.GetUserBindDN(ldapCfg.ConfigEntry, ldapConnection, username)
-	if err != nil {
-		return nil, fmt.Errorf("unable to get user binddn: %w", err)
-	}
-	b.Logger().Debug("auth/ldap: User BindDN fetched", "username", caller.UserName(), "binddn", userBindDN)
-
-	userDN, err := ldapClient.GetUserDN(ldapCfg.ConfigEntry, ldapConnection, userBindDN, username)
-	if err != nil {
-		return nil, fmt.Errorf("unable to get user dn: %w", err)
-	}
-
-	ldapGroups, err := ldapClient.GetLdapGroups(ldapCfg.ConfigEntry, ldapConnection, userDN, username)
-	if err != nil {
-		return nil, fmt.Errorf("unable to get ldap groups: %w", err)
-	}
-	b.Logger().Debug("auth/ldap: Groups fetched from server", "num_server_groups", len(ldapGroups), "server_groups", ldapGroups)
-
+	// The directory half, and only when this mount has one. A mount without config/ldap is the
+	// machine mount: the ticket is the whole of the identity there.
 	var allGroups []string
-	// Merge local and LDAP groups
-	allGroups = append(allGroups, ldapGroups...)
+	if ldapCfg != nil {
+		ldapClient := ldaputil.Client{
+			Logger: b.Logger(),
+			LDAP:   ldaputil.NewLDAP(),
+		}
+
+		ldapConnection, err := ldapClient.DialLDAP(ldapCfg.ConfigEntry)
+		if err != nil {
+			return nil, fmt.Errorf("could not connect to LDAP: %w", err)
+		}
+		if ldapConnection == nil {
+			return nil, errors.New("invalid connection returned from LDAP dial")
+		}
+
+		// Clean ldap connection
+		defer ldapConnection.Close()
+
+		if len(ldapCfg.BindPassword) > 0 {
+			err = ldapConnection.Bind(ldapCfg.BindDN, ldapCfg.BindPassword)
+		} else {
+			err = ldapConnection.UnauthenticatedBind(ldapCfg.BindDN)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("LDAP bind failed: %v", err)
+		}
+
+		userBindDN, err := ldapClient.GetUserBindDN(ldapCfg.ConfigEntry, ldapConnection, username)
+		if err != nil {
+			return nil, fmt.Errorf("unable to get user binddn: %w", err)
+		}
+		b.Logger().Debug("auth/ldap: User BindDN fetched", "username", caller.UserName(), "binddn", userBindDN)
+
+		userDN, err := ldapClient.GetUserDN(ldapCfg.ConfigEntry, ldapConnection, userBindDN, username)
+		if err != nil {
+			return nil, fmt.Errorf("unable to get user dn: %w", err)
+		}
+
+		ldapGroups, err := ldapClient.GetLdapGroups(ldapCfg.ConfigEntry, ldapConnection, userDN, username)
+		if err != nil {
+			return nil, fmt.Errorf("unable to get ldap groups: %w", err)
+		}
+		b.Logger().Debug("auth/ldap: Groups fetched from server", "num_server_groups", len(ldapGroups), "server_groups", ldapGroups)
+		allGroups = append(allGroups, ldapGroups...)
+	}
 
 	// Retrieve policies
 	var policies []string
@@ -267,8 +277,10 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 		Alias:       &logical.Alias{Name: caller.UserName()},
 	}
 
-	if err := ldapCfg.PopulateTokenAuth(auth, req); err != nil {
-		return nil, fmt.Errorf("failed to populate auth information: %w", err)
+	if ldapCfg != nil {
+		if err := ldapCfg.PopulateTokenAuth(auth, req); err != nil {
+			return nil, fmt.Errorf("failed to populate auth information: %w", err)
+		}
 	}
 
 	// This is done after PopulateTokenAuth because it forces Renewable to be true.
