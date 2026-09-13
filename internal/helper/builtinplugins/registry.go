@@ -11,6 +11,7 @@ import (
 	credAppRole "github.com/openbao/openbao/v2/internal/builtin/credential/approle"
 	credCert "github.com/openbao/openbao/v2/internal/builtin/credential/cert"
 	credJWT "github.com/openbao/openbao/v2/internal/builtin/credential/jwt"
+	credKerberos "github.com/openbao/openbao/v2/internal/builtin/credential/kerberos"
 	credKube "github.com/openbao/openbao/v2/internal/builtin/credential/kubernetes"
 	credUserpass "github.com/openbao/openbao/v2/internal/builtin/credential/userpass"
 	dbCass "github.com/openbao/openbao/v2/internal/builtin/database/cassandra"
@@ -56,9 +57,15 @@ type logicalBackend struct {
 func newRegistry() *registry {
 	reg := &registry{
 		credentialBackends: map[string]credentialBackend{
-			"approle":    {Factory: credAppRole.Factory},
-			"cert":       {Factory: credCert.Factory},
-			"jwt":        {Factory: credJWT.Factory},
+			"approle": {Factory: credAppRole.Factory},
+			"cert":    {Factory: credCert.Factory},
+			"jwt":     {Factory: credJWT.Factory},
+			// Carried back after GH-3882 moved it out of this binary. A machine in a Kerberos realm
+			// has exactly one credential that is not a file somebody placed — its own ticket — and
+			// this is what lets it log in with that. Until the plugin ships in openbao-plugins, it
+			// lives here; the code is the one that was removed, with its Kerberos library changed
+			// to the one the rest of this build already carries.
+			"kerberos":   {Factory: credKerberos.Factory},
 			"kubernetes": {Factory: credKube.Factory},
 			"oidc":       {Factory: credJWT.Factory},
 			"userpass":   {Factory: credUserpass.Factory},
