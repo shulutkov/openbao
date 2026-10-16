@@ -43,6 +43,7 @@ import (
 	"github.com/openbao/openbao/v2/internal/command/server"
 	"github.com/openbao/openbao/v2/internal/helper/builtinplugins"
 	"github.com/openbao/openbao/v2/internal/helper/configutil"
+	"github.com/openbao/openbao/v2/internal/helper/kerberos"
 	"github.com/openbao/openbao/v2/internal/helper/kmsplugin"
 	"github.com/openbao/openbao/v2/internal/helper/listenerutil"
 	loghelper "github.com/openbao/openbao/v2/internal/helper/logging"
@@ -133,6 +134,8 @@ type ServerCommand struct {
 	flagTestVerifyOnly     bool
 	flagTestServerConfig   bool
 	flagExitOnCoreShutdown bool
+	flagKerberosPrincipal  string
+	flagKerberosKeytabFile string
 }
 
 func (c *ServerCommand) Synopsis() string {
@@ -191,6 +194,23 @@ func (c *ServerCommand) Flags() *FlagSets {
 		Target:  &c.flagExitOnCoreShutdown,
 		Default: false,
 		Usage:   "Exit the OpenBao server if the OpenBao core is shutdown.",
+	})
+
+	f.StringVar(&StringVar{
+		Name:   "kerberos-principal",
+		Target: &c.flagKerberosPrincipal,
+		EnvVar: "BAO_KERBEROS_PRINCIPAL",
+		Usage: "Kerberos principal used to authenticate to PostgreSQL servers, " +
+			"for example \"openbao@EXAMPLE.COM\". Overrides \"principal\" of the " +
+			"\"kerberos\" stanza of the configuration.",
+	})
+
+	f.StringVar(&StringVar{
+		Name:   "kerberos-keytab-file",
+		Target: &c.flagKerberosKeytabFile,
+		EnvVar: "BAO_KERBEROS_KEYTAB_FILE",
+		Usage: "Path to the keytab holding the keys of the Kerberos principal. " +
+			"Overrides \"keytab_file\" of the \"kerberos\" stanza of the configuration.",
 	})
 
 	f.BoolVar(&BoolVar{
@@ -705,6 +725,50 @@ func (q quiescenceSink) Accept(name string, level hclog.Level, msg string, args 
 	q.t.Reset(100 * time.Millisecond)
 }
 
+// applyKerberosFlags overrides the "kerberos" stanza with the values of the
+// -kerberos-principal and -kerberos-keytab-file flags, creating the stanza
+// when the configuration has none.
+func (c *ServerCommand) applyKerberosFlags(config *server.Config) {
+	if c.flagKerberosPrincipal == "" && c.flagKerberosKeytabFile == "" {
+		return
+	}
+
+	if config.Kerberos == nil {
+		config.Kerberos = &server.Kerberos{}
+	}
+	if c.flagKerberosPrincipal != "" {
+		config.Kerberos.Principal = c.flagKerberosPrincipal
+	}
+	if c.flagKerberosKeytabFile != "" {
+		config.Kerberos.KeytabFile = c.flagKerberosKeytabFile
+	}
+}
+
+// setupKerberos loads the Kerberos credentials of the "kerberos" stanza and
+// flags, if present, for the PostgreSQL connections of this process. It is
+// called at startup and on every configuration reload, so that a changed
+// keytab is picked up. Unusable credentials are logged here; previously
+// loaded credentials, if any, remain in use, otherwise every connection that
+// requests GSSAPI authentication reports the error.
+func (c *ServerCommand) setupKerberos(config *server.Config) {
+	c.applyKerberosFlags(config)
+	if config.Kerberos == nil {
+		kerberos.Clear()
+		return
+	}
+
+	if err := kerberos.Setup(kerberosConfig(config)); err != nil {
+		c.logger.Error("kerberos credentials could not be loaded; previously loaded credentials, if any, remain in use", "error", err)
+	}
+}
+
+func kerberosConfig(config *server.Config) kerberos.Config {
+	return kerberos.Config{
+		Principal:  config.Kerberos.Principal,
+		KeytabFile: config.Kerberos.KeytabFile,
+	}
+}
+
 func (c *ServerCommand) setupStorage(config *server.Config) (physical.Backend, error) {
 	// Ensure that a backend is provided
 	if config.Storage == nil {
@@ -1056,6 +1120,10 @@ func (c *ServerCommand) Run(args []string) int {
 		return 1
 	}
 	metricsHelper := metricsutil.NewMetricsHelper(inmemMetrics, prometheusEnabled)
+
+	// Kerberos credentials must be registered before any PostgreSQL
+	// connection, including the one of the storage backend, is made.
+	c.setupKerberos(config)
 
 	// Initialize the storage backend
 	var backend physical.Backend
@@ -1510,6 +1578,9 @@ func (c *ServerCommand) Run(args []string) int {
 			}
 
 			core.SetConfig(config)
+
+			// Re-read the Kerberos keytab, picking up rotated keys.
+			c.setupKerberos(config)
 
 			// reloading custom response headers to make sure we have
 			// the most up to date headers after reloading the config file

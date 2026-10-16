@@ -22,6 +22,7 @@ import (
 	"github.com/openbao/openbao/sdk/v2/physical"
 	cserver "github.com/openbao/openbao/v2/internal/command/server"
 	"github.com/openbao/openbao/v2/internal/helper/configutil"
+	"github.com/openbao/openbao/v2/internal/helper/kerberos"
 	"github.com/openbao/openbao/v2/internal/helper/kmsplugin"
 	"github.com/openbao/openbao/v2/internal/helper/listenerutil"
 	"github.com/openbao/openbao/v2/internal/helper/metricsutil"
@@ -293,6 +294,11 @@ func (c *OperatorDiagnoseCommand) offlineDiagnostics(ctx context.Context) error 
 		}
 
 		_ = diagnose.Test(ctx, "Create Storage Backend", func(ctx context.Context) error {
+			if config.Kerberos != nil {
+				if err := kerberos.Setup(kerberosConfig(config)); err != nil {
+					return err
+				}
+			}
 			b, err := server.setupStorage(config)
 			if err != nil {
 				return err

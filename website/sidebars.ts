@@ -151,6 +151,7 @@ const sidebars: SidebarsConfig = {
                         "configuration/storage/pebbledb",
                     ],
                 },
+                "configuration/kerberos",
                 "configuration/plugins",
                 "configuration/telemetry",
                 "configuration/ui",
